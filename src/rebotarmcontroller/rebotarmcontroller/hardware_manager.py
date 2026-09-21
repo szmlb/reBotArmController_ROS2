@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import math
 import threading
 import time
 
@@ -10,7 +11,6 @@ from .conversions import fk_to_pose
 from .hardware_config import resolve_hardware_config
 
 _GRIPPER_GOAL_TOLERANCE_RAD = 0.12
-_GRIPPER_CLOSED_POSITION = 0.0
 
 
 def _locked(method):
@@ -51,6 +51,7 @@ class HardwareManager:
         self._pad_q_for_model = pad_q_for_model
 
         runtime_config = hardware_data["_runtime"]
+        self.model_name = str(runtime_config.get("model", "dm")).lower()
         control_runtime = runtime_config["control"]
         self._arm_control_mode = control_runtime["arm_control_mode"]
 
@@ -76,6 +77,7 @@ class HardwareManager:
         gripper_limits = hardware_data.get("gripper", {}).get("position_limits", {})
         self.gripper_open_position = float(gripper_limits.get("open", 0.0))
         self.gripper_close_position = float(gripper_limits.get("close", 0.0))
+        self._configure_gripper_position_limits()
         self._gripper_target_position: float | None = None
 
         self._gc_model = load_robot_model()
@@ -109,6 +111,36 @@ class HardwareManager:
     @property
     def joint_names(self) -> list[str]:
         return list(self._arm_group.joint_names)
+
+    @property
+    def gripper_joint_names(self) -> list[str]:
+        if self.model_name == "dm":
+            return ["finger_left", "finger_right"]
+        return ["gripper_joint1", "gripper_joint2"]
+
+    def _configure_gripper_position_limits(self) -> None:
+        open_position = self.gripper_open_position
+        close_position = self.gripper_close_position
+        if not all(math.isfinite(v) for v in (open_position, close_position)):
+            raise ValueError("gripper position_limits open/close must be finite")
+
+        if open_position == close_position:
+            raise ValueError("gripper position_limits open and close must differ")
+
+        self._gripper_position_lower = min(open_position, close_position)
+        self._gripper_position_upper = max(open_position, close_position)
+
+    def validate_gripper_position(self, position: float) -> float:
+        target = float(position)
+        if not math.isfinite(target):
+            raise ValueError("gripper position must be finite")
+        if not self._gripper_position_lower <= target <= self._gripper_position_upper:
+            raise ValueError(
+                f"gripper position {target:.3f} rad is outside safe range "
+                f"[{self._gripper_position_lower:.3f}, "
+                f"{self._gripper_position_upper:.3f}] rad"
+            )
+        return target
 
     @property
     def mode(self) -> str:
@@ -289,7 +321,7 @@ class HardwareManager:
             self._homing_thread = threading.get_ident()
         try:
             if self.has_gripper:
-                self.set_gripper_position(_GRIPPER_CLOSED_POSITION)
+                self.set_gripper_position(self.gripper_close_position)
             self._endpos_ctrl.safe_home()
         finally:
             self._homing_thread = None
@@ -530,8 +562,8 @@ class HardwareManager:
 
     @_locked
     def set_gripper_target(self, position: float) -> None:
+        target = self.validate_gripper_position(position)
         self._begin_gripper_command(allow_endpos=True)
-        target = float(position)
         self._endpos_ctrl.set_gripper_target(target)
         self._gripper_group.send_mit(
             np.array([target], dtype=np.float64),
@@ -588,6 +620,7 @@ class HardwareManager:
         kd: float,
         tau: float,
     ) -> None:
+        pos = self.validate_gripper_position(pos)
         self._begin_gripper_command()
         self._begin_gripper_lowlevel("mit")
         # When the web sends kp=0 or kd=0, pass None so the JointGroup
@@ -605,6 +638,7 @@ class HardwareManager:
 
     @_locked
     def send_gripper_pos_vel_cmd(self, pos: float, vlim: float) -> None:
+        pos = self.validate_gripper_position(pos)
         self._begin_gripper_command()
         self._begin_gripper_lowlevel("pos_vel")
         self._gripper_group.send_pos_vel(

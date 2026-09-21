@@ -1,4 +1,5 @@
 from glob import glob
+from pathlib import Path
 from setuptools import setup
 
 package_name = "rebotarm_bringup"
@@ -7,6 +8,25 @@ config_files = [
     "config/rebotarm_hardware.yaml",
 ]
 
+
+def _description_data_files(package_name):
+    data_files = []
+    source_root = Path(__file__).resolve().parent
+    for model in ("RS", "DM"):
+        model_root = source_root / "description" / model
+        for path in sorted(model_root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative_dir = path.parent.relative_to(model_root)
+            destination = f"share/{package_name}/description/{model}"
+            if str(relative_dir) != ".":
+                destination = f"{destination}/{relative_dir.as_posix()}"
+            data_files.append(
+                (destination, [path.relative_to(source_root).as_posix()])
+            )
+    return data_files
+
+
 setup(
     name=package_name,
     version="0.3.0",
@@ -14,18 +34,9 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/launch", glob("launch/*.launch.py")),
+        (f"share/{package_name}/launch", glob("launch/*.py")),
         (f"share/{package_name}/config", config_files),
-        (f"share/{package_name}/description/urdf", glob("description/urdf/*.urdf")),
-        (f"share/{package_name}/description/meshes", glob("description/meshes/*")),
-        (
-            f"share/{package_name}/description/meshes_b601_gripper",
-            glob("description/meshes_b601_gripper/*"),
-        ),
-        (
-            f"share/{package_name}/description/meshes_rs",
-            glob("description/meshes_rs/*"),
-        ),
+        *_description_data_files(package_name),
         (f"share/{package_name}/rviz", glob("rviz/*.rviz")),
     ],
     install_requires=["setuptools"],

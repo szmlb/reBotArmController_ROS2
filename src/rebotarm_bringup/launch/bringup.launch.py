@@ -32,7 +32,14 @@ def _resolve_effective_model(context, *args, **kwargs):
             with open(config_path, "r", encoding="utf-8") as f:
                 ros_config = yaml.safe_load(f) or {}
             effective = str(ros_config.get("default_model") or "dm")
-    return [SetLaunchConfiguration("effective_model", effective.strip().lower())]
+    effective = effective.strip().lower()
+    ee_frame_id = LaunchConfiguration("ee_frame_id").perform(context).strip()
+    if not ee_frame_id:
+        ee_frame_id = "gripper_end" if effective == "rs" else "end_link"
+    return [
+        SetLaunchConfiguration("effective_model", effective),
+        SetLaunchConfiguration("ee_frame_id", ee_frame_id),
+    ]
 
 
 def generate_launch_description():
@@ -49,22 +56,23 @@ def generate_launch_description():
     disable_after_safe_home = LaunchConfiguration("disable_after_safe_home")
     effective_model = LaunchConfiguration("effective_model")
 
-    urdf_file = PathJoinSubstitution(
+    model_urdf = PythonExpression(
         [
-            bringup_share,
-            "description",
-            "urdf",
-            PythonExpression(
-                [
-                    "'00-arm-rs_asm-v3.urdf' if '",
-                    effective_model,
-                    "'.lower() == 'rs' else 'reBot-DevArm_fixend.urdf'",
-                ]
-            ),
+            "'RS/urdf/ReBot_Arm_RS.urdf' if '",
+            effective_model,
+            "'.lower() == 'rs' else 'DM/urdf/ReBot_Arm_DM.urdf'",
         ]
     )
+    urdf_file = PathJoinSubstitution(
+        [bringup_share, "description", model_urdf]
+    )
+    rviz_urdf_compat = PathJoinSubstitution(
+        [bringup_share, "launch", "rviz_urdf_compat.py"]
+    )
     rviz_config = PathJoinSubstitution([bringup_share, "rviz", "rebotarm.rviz"])
-    robot_description = ParameterValue(Command(["cat ", urdf_file]), value_type=str)
+    robot_description = ParameterValue(
+        Command(["python3 ", rviz_urdf_compat, " ", urdf_file]), value_type=str
+    )
 
     return LaunchDescription(
         [
@@ -81,7 +89,7 @@ def generate_launch_description():
             DeclareLaunchArgument("arm_namespace", default_value="rebotarm"),
             DeclareLaunchArgument("use_rviz", default_value="false"),
             DeclareLaunchArgument("frame_id", default_value="base_link"),
-            DeclareLaunchArgument("ee_frame_id", default_value="end_link"),
+            DeclareLaunchArgument("ee_frame_id", default_value=""),
             DeclareLaunchArgument("disable_after_safe_home", default_value="true"),
             OpaqueFunction(function=_resolve_effective_model),
             Node(

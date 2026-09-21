@@ -365,7 +365,8 @@ rebotarm_msgs/srv/SetGripper
 ```
 
 说明：设置夹爪电机位置。ROS 层直接调用 SDK `Gripper.pos_vel()`，因此这里沿用
-SDK 夹爪电机角度单位 rad，不再做开口距离到电机角度的二次映射。
+SDK 夹爪电机角度单位 rad，不再做开口距离到电机角度的二次映射。控制器按模型校验
+配置范围：DM 为 `[-5.0, 0.0]` rad，RS 为 `[0.0, 5.0]` rad，越界目标会被拒绝。
 
 请求：
 
@@ -397,7 +398,7 @@ rebotarm_msgs/srv/GripperCommand
 ```
 
 说明：用位置控制打开夹爪。`position` 为目标夹爪电机角度，单位 rad；传 `0.0`
-时使用 controller 默认打开位置。`timeout` 小于等于 `0.0` 时使用默认超时。
+时使用 controller 配置的打开位置。`timeout` 小于等于 `0.0` 时使用默认超时。
 
 请求：
 
@@ -430,7 +431,7 @@ rebotarm_msgs/srv/GripperCommand
 ```
 
 说明：用位置控制闭合夹爪。`position` 为目标夹爪电机角度，单位 rad；传 `0.0`
-时使用 controller 默认闭合位置。该接口不做力反馈夹取判断。
+时使用 controller 配置的闭合位置。该接口不做力反馈夹取判断。
 
 示例：
 
@@ -554,6 +555,7 @@ control_msgs/action/GripperCommand
 
 Goal 中 `command.position` 单位为夹爪电机角度 rad。`command.max_effort` 为标准
 action 字段，当前 ROS 适配层直接使用 SDK POS_VEL 控制，暂不使用该字段做力矩限制。
+`command.position` 会按当前模型的配置范围校验。
 
 示例：
 
@@ -581,6 +583,7 @@ ros2 action send_goal /rebotarm/gripper/command control_msgs/action/GripperComma
 - 重力补偿运行时拒绝全部低层 command。
 - 轨迹运行时，arm joint 低层 command 默认拒绝；只有 `cmd_arbitration:=preempt` 时才会先停止轨迹再进入低层模式。
 - 轨迹运行时，gripper 低层 command 始终拒绝，不抢占 arm 轨迹。
+- 夹爪 MIT / POS_VEL command 的 `pos` 会按当前模型的配置范围校验。
 - 低层 command 是调试入口，不做轨迹规划、IK 或 URDF joint limit 校验；应用层运动优先使用 action / service。
 
 ### `/rebotarm/joints/<joint>/cmd/mit`

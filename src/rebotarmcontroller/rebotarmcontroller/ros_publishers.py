@@ -4,7 +4,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rebotarm_msgs.msg import ArmStatus, JointMotorState
 from sensor_msgs.msg import JointState
 
-_GRIPPER_MAX_WIDTH = 0.09
+_RS_GRIPPER_JOINT_LIMITS = (0.05, 0.0715)
+_DM_GRIPPER_JOINT_LIMITS = (0.05, -0.05)
 
 
 def _gripper_motor_to_joint_position(
@@ -14,7 +15,7 @@ def _gripper_motor_to_joint_position(
 ) -> float:
     span = open_position - close_position
     ratio = 0.0 if span == 0.0 else (position - close_position) / span
-    return max(0.0, min(_GRIPPER_MAX_WIDTH * 0.5, ratio * _GRIPPER_MAX_WIDTH * 0.5))
+    return max(0.0, min(1.0, ratio))
 
 
 class JointStatePublisher:
@@ -90,22 +91,26 @@ class JointStatePublisher:
 
         if self._gripper_state_publisher is not None:
             g_pos, g_vel, g_torque, g_status = self._hardware.get_gripper_state()
-            joint_pos = _gripper_motor_to_joint_position(
+            ratio = _gripper_motor_to_joint_position(
                 float(g_pos),
                 self._hardware.gripper_open_position,
                 self._hardware.gripper_close_position,
             )
-            joint_vel = (
-                _gripper_motor_to_joint_position(
-                    float(g_pos + g_vel),
-                    self._hardware.gripper_open_position,
-                    self._hardware.gripper_close_position,
-                )
-                - joint_pos
+            next_ratio = _gripper_motor_to_joint_position(
+                float(g_pos + g_vel),
+                self._hardware.gripper_open_position,
+                self._hardware.gripper_close_position,
             )
-            msg.name.extend(["gripper_joint1", "gripper_joint2"])
-            msg.position.extend([joint_pos, joint_pos])
-            msg.velocity.extend([joint_vel, joint_vel])
+            ratio_delta = next_ratio - ratio
+
+            gripper_joint_names = self._hardware.gripper_joint_names
+            if gripper_joint_names == ["finger_left", "finger_right"]:
+                limits = _DM_GRIPPER_JOINT_LIMITS
+            else:
+                limits = _RS_GRIPPER_JOINT_LIMITS
+            msg.name.extend(gripper_joint_names)
+            msg.position.extend([ratio * limit for limit in limits])
+            msg.velocity.extend([ratio_delta * limit for limit in limits])
             msg.effort.extend([float(g_torque), float(g_torque)])
 
             gripper_msg = JointMotorState()
