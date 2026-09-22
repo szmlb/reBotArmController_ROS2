@@ -68,6 +68,13 @@ class DrawSquare(MoveItDemoBase):
                 return False
             current_joints = target
 
+        if not self._plan_to_joints("return to start", current_joints, self.start_point):
+            return False
+
+        home_point = [0.0] * len(self.joint_names)
+        if not self._plan_to_joints("home", self.start_point, home_point):
+            return False
+
         self.node.get_logger().info("rectangle draw demo finished")
         return True
 
