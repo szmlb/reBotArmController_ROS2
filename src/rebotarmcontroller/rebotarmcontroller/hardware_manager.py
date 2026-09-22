@@ -11,6 +11,8 @@ from .conversions import fk_to_pose
 from .hardware_config import resolve_hardware_config
 
 _GRIPPER_GOAL_TOLERANCE_RAD = 0.12
+_GRIPPER_MAX_VELOCITY_RAD_S = 3.0
+_GRIPPER_RAMP_RATE_HZ = 50.0
 
 
 def _locked(method):
@@ -560,17 +562,29 @@ class HardwareManager:
     # gripper
     # ------------------------------------------------------------------
 
+    def _send_gripper_raw(self, position: float) -> None:
+        self._endpos_ctrl.set_gripper_target(position)
+        self._gripper_group.send_mit(
+            np.array([position], dtype=np.float64),
+            kp=getattr(self._gripper_group, "_mit_kp"),
+            kd=getattr(self._gripper_group, "_mit_kd"),
+        )
+
     @_locked
     def set_gripper_target(self, position: float) -> None:
         target = self.validate_gripper_position(position)
         self._begin_gripper_command(allow_endpos=True)
-        self._endpos_ctrl.set_gripper_target(target)
-        self._gripper_group.send_mit(
-            np.array([target], dtype=np.float64),
-            kp=getattr(self._gripper_group, "_mit_kp"),
-            kd=getattr(self._gripper_group, "_mit_kd"),
-        )
+        # Set the goal up front so gripper_reached_target() tracks the final
+        # target throughout the ramp below, not each intermediate waypoint.
         self._gripper_target_position = target
+
+        start = float(self._gripper_group.get_positions()[0])
+        distance = abs(target - start)
+        steps = max(1, int(distance / _GRIPPER_MAX_VELOCITY_RAD_S * _GRIPPER_RAMP_RATE_HZ))
+        for step in range(1, steps + 1):
+            self._send_gripper_raw(start + (target - start) * (step / steps))
+            if step < steps:
+                time.sleep(1.0 / _GRIPPER_RAMP_RATE_HZ)
 
     def wait_gripper_target(self, timeout: float = 3.0) -> bool:
         deadline = time.monotonic() + timeout

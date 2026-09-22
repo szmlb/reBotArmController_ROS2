@@ -139,6 +139,11 @@ class PickPlace(MoveItDemoBase):
             return False
         if not self._plan_to_joints("ready", current, ready_point):
             return False
+        current = ready_point
+        if not self._command_gripper("close"):
+            return False
+        if not self._plan_to_joints("home", current, zero_point):
+            return False
 
         self.node.get_logger().info("pick demo finished")
         return True
