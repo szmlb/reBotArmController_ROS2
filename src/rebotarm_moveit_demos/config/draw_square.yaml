@@ -10,7 +10,6 @@ draw_square:
       - joint6
     wrap_joint_names:
       - joint6
-    max_wrap_joint_delta: 3.0
 
     frame_id: base_link
     tcp_link_name: gripper_tcp
@@ -20,7 +19,6 @@ draw_square:
     rectangle_width: 0.04
     rectangle_height: 0.08
     tcp_rpy: [0.0, 1.57, 0.0]
-    tcp_yaw_offsets: [0.0, 3.1416, -3.1416]
 
     planning_time: 5.0
     planner_id: RRTConnect
@@ -28,6 +26,7 @@ draw_square:
     joint_tolerance: 0.01
     velocity_scaling: 0.2
     acceleration_scaling: 0.2
-    ik_timeout: 5.0
     result_timeout: 30.0
     avoid_collisions: true
+    cartesian_max_step: 0.005
+    cartesian_min_fraction: 0.95

@@ -3,9 +3,9 @@ from __future__ import annotations
 import sys
 from math import pi
 
-from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
+from geometry_msgs.msg import Point, Pose, Quaternion
 from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
-from moveit_msgs.srv import GetMotionPlan
+from moveit_msgs.srv import GetCartesianPath, GetMotionPlan
 import rclpy
 from std_msgs.msg import Header
 from tf_transformations import quaternion_from_euler
@@ -14,12 +14,11 @@ from rebotarm_moveit_demos.demo_common import MoveItDemoBase
 
 
 class DrawSquare(MoveItDemoBase):
-    """Move the TCP through four coplanar rectangle corners."""
+    """Move the TCP through four coplanar rectangle corners as one continuous Cartesian path."""
 
     def __init__(self) -> None:
         super().__init__("draw_square")
         self.wrap_joint_names = {str(name) for name in self._param("wrap_joint_names")}
-        self.max_wrap_joint_delta = float(self._param("max_wrap_joint_delta"))
         self.frame_id = str(self._param("frame_id"))
         self.tcp_link_name = str(self._param("tcp_link_name"))
         self.start_point = self._wrap_joints(
@@ -29,11 +28,14 @@ class DrawSquare(MoveItDemoBase):
         self.rectangle_width = float(self._param("rectangle_width"))
         self.rectangle_height = float(self._param("rectangle_height"))
         self.tcp_rpy = [float(value) for value in self._param("tcp_rpy")]
-        self.tcp_yaw_offsets = [float(value) for value in self._param("tcp_yaw_offsets")]
         self._planner = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
-        self.ik_timeout = float(self._param("ik_timeout"))
+        self._cartesian_path = self.node.create_client(
+            GetCartesianPath, "/compute_cartesian_path"
+        )
         self.result_timeout = float(self._param("result_timeout"))
         self.avoid_collisions = bool(self._param("avoid_collisions"))
+        self.cartesian_max_step = float(self._param("cartesian_max_step"))
+        self.cartesian_min_fraction = float(self._param("cartesian_min_fraction"))
 
     def run(self) -> bool:
         if not self._planner.wait_for_service(timeout_sec=30.0):
@@ -41,7 +43,10 @@ class DrawSquare(MoveItDemoBase):
                 "MoveIt service /plan_kinematic_path is not available"
             )
             return False
-        if not self.wait_for_ik_service():
+        if not self._cartesian_path.wait_for_service(timeout_sec=30.0):
+            self.node.get_logger().error(
+                "MoveIt service /compute_cartesian_path is not available"
+            )
             return False
         if not self.wait_for_execute_server():
             return False
@@ -51,24 +56,12 @@ class DrawSquare(MoveItDemoBase):
             return False
 
         points = self._rectangle_points()
-        first_corner = self.corner_joint_target(points[0], self.start_point, "corner 1")
-        if first_corner is None or not self._plan_to_joints(
-            "corner 1",
-            self.start_point,
-            first_corner,
-        ):
+        waypoints = [self._waypoint(point) for point in points + [points[0]]]
+        final_joints = self._plan_cartesian_path("rectangle", self.start_point, waypoints)
+        if final_joints is None:
             return False
 
-        current_joints = first_corner
-        for edge_index, end in enumerate(points[1:] + [points[0]], start=1):
-            target = self.corner_joint_target(end, current_joints, f"corner {edge_index + 1}")
-            if target is None:
-                return False
-            if not self._plan_to_joints(f"edge {edge_index}", current_joints, target):
-                return False
-            current_joints = target
-
-        if not self._plan_to_joints("return to start", current_joints, self.start_point):
+        if not self._plan_to_joints("return to start", final_joints, self.start_point):
             return False
 
         home_point = [0.0] * len(self.joint_names)
@@ -89,77 +82,68 @@ class DrawSquare(MoveItDemoBase):
             [center[0] - half_width, center[1] + half_height, center[2]],
         ]
 
-    def _waypoint(self, tcp_position: list[float], yaw_offset: float = 0.0) -> Pose:
+    def _waypoint(self, tcp_position: list[float]) -> Pose:
         roll, pitch, yaw = self.tcp_rpy
-        qx, qy, qz, qw = quaternion_from_euler(roll, pitch, yaw + yaw_offset)
+        qx, qy, qz, qw = quaternion_from_euler(roll, pitch, yaw)
         return Pose(
             position=Point(x=tcp_position[0], y=tcp_position[1], z=tcp_position[2]),
             orientation=Quaternion(x=qx, y=qy, z=qz, w=qw),
         )
 
-    def corner_joint_target(
+    def _plan_cartesian_path(
         self,
-        tcp_position: list[float],
-        seed_values: list[float],
         label: str,
+        start_values: list[float],
+        waypoints: list[Pose],
     ) -> list[float] | None:
-        seed_values = self._wrap_joints(seed_values)
-        self.node.get_logger().info(
-            f"compute IK for {label}: "
-            f"[{tcp_position[0]:.3f}, {tcp_position[1]:.3f}, {tcp_position[2]:.3f}]"
-        )
+        start_values = self._wrap_joints(start_values)
+        self.node.get_logger().info(f"move through {label} (cartesian)")
+        request = GetCartesianPath.Request()
+        request.header = Header(frame_id=self.frame_id)
+        request.start_state = self._joint_state(start_values)
+        request.group_name = self.group_name
+        request.link_name = self.tcp_link_name
+        request.waypoints = waypoints
+        request.max_step = self.cartesian_max_step
+        request.jump_threshold = 0.0
+        request.avoid_collisions = self.avoid_collisions
+        request.max_velocity_scaling_factor = float(self._param("velocity_scaling"))
+        request.max_acceleration_scaling_factor = float(self._param("acceleration_scaling"))
 
-        best = None
-        best_yaw_offset = 0.0
-        best_cost = float("inf")
-        for yaw_offset in self.tcp_yaw_offsets:
-            target = self._corner_joint_target(tcp_position, seed_values, label, yaw_offset)
-            if target is None:
-                continue
-            if any(
-                name in self.wrap_joint_names
-                and abs(goal - start) > self.max_wrap_joint_delta
-                for name, start, goal in zip(self.joint_names, seed_values, target)
-            ):
-                continue
-            cost = sum(abs(goal - start) for start, goal in zip(seed_values, target))
-            if cost < best_cost:
-                best = target
-                best_yaw_offset = yaw_offset
-                best_cost = cost
-
-        if best is None:
+        future = self._cartesian_path.call_async(request)
+        if not self.wait(future, self.result_timeout):
             self.node.get_logger().error(
-                f"Failed to compute IK for {label} without wrapped-joint flip"
+                f"Cartesian path planner did not return within {self.result_timeout:.1f}s"
+            )
+            return None
+
+        response = future.result()
+        if response is None or response.error_code.val != MoveItErrorCodes.SUCCESS:
+            code = response.error_code.val if response is not None else "empty"
+            message = response.error_code.message if response is not None else ""
+            self.node.get_logger().error(
+                f"Cartesian path planning failed with code {code}: {message}"
+            )
+            return None
+
+        if response.fraction < self.cartesian_min_fraction:
+            self.node.get_logger().error(
+                f"Cartesian path for {label} only {response.fraction:.3f} complete "
+                f"(minimum {self.cartesian_min_fraction:.3f}); aborting"
             )
             return None
 
         self.node.get_logger().info(
-            f"{label} target yaw_offset={best_yaw_offset:.4f}: "
-            f"{[round(value, 4) for value in best]}"
+            f"MoveIt planned {label} ({response.fraction:.3f} complete)"
         )
-        return best
+        if not self.execute_trajectory(response.solution, self.result_timeout):
+            return None
 
-    def _corner_joint_target(
-        self,
-        tcp_position: list[float],
-        seed_values: list[float],
-        label: str,
-        yaw_offset: float,
-    ) -> list[float] | None:
-        target = self.compute_ik_joint_target(
-            PoseStamped(
-                header=Header(frame_id=self.frame_id),
-                pose=self._waypoint(tcp_position, yaw_offset),
-            ),
-            seed_values,
-            self.tcp_link_name,
-            self.ik_timeout,
-            self.avoid_collisions,
-            f"IK for {label} yaw_offset={yaw_offset:.4f}",
-            warn_only=True,
+        final_point = response.solution.joint_trajectory.points[-1]
+        joint_map = dict(
+            zip(response.solution.joint_trajectory.joint_names, final_point.positions)
         )
-        return None if target is None else self._wrap_joints(target, seed_values)
+        return [float(joint_map[name]) for name in self.joint_names]
 
     def _wrap_joints(
         self,
